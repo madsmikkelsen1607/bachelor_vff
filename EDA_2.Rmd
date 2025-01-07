@@ -1,0 +1,277 @@
+---
+title: "Viborg_FF"
+author: "Kenny Truong"
+date: "2024-12-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+rm(list = ls())
+pacman::p_load(tidyverse, rjson, xml2, XML, tibble, ndjson, jsonlite, ggrepel, readr, tidyr, dplyr, knitr)
+knitr::opts_chunk$set(echo = TRUE, include = TRUE, message = FALSE, warning = FALSE)
+knitr::opts_knit$set(root.dir = 'C:/Users/viggo/Documents/Cognitive Science/5th semester/Bachelor/git_workspace/vff_loc_data')
+```
+
+```{r}
+xml_data <- read_xml("tracking-produced.xml")
+#xml_data <- read_xml("tracking-produced.xml")
+# Parse player and ball data
+parsed_data <- xml_data %>%
+  xml_find_all("//frame") %>%
+  map_df(function(frame) {
+    # General frame attributes
+    time <- as.numeric(xml_attr(frame, "time"))
+    wall_clock <- as.numeric(xml_attr(frame, "wall_clock"))
+    live <- xml_attr(frame, "live")
+    possession <- xml_attr(frame, "possession")
+    
+    # Parse player data
+    players <- xml_find_all(frame, "./player") %>%
+      map_df(function(player) {
+        loc <- xml_attr(player, "loc") %>% gsub("\\[|\\]", "", .) %>% strsplit(", ")
+        tibble(
+          time = time,
+          frameIdx = as.integer(time * 25),  # Convert time to frame index (25 FPS)
+          wall_clock = wall_clock,
+          live = live,
+          possession = possession,
+          player_id = xml_attr(player, "id"),
+          num = xml_attr(player, "num"),
+          x = as.numeric(loc[[1]][1]),
+          y = as.numeric(loc[[1]][2]),
+          z = as.numeric(loc[[1]][3]),
+          spd = as.numeric(xml_attr(player, "spd")),
+          dist = as.numeric(xml_attr(player, "dist")),
+          opta_id = as.character(xml_attr(player, "opta_id")),
+          role = "player"
+        )
+      })
+    
+    # Parse ball data
+    ball <- xml_find_first(frame, "./ball")
+    ball_row <- if (!is.null(ball)) {
+      loc <- xml_attr(ball, "loc") %>% gsub("\\[|\\]", "", .) %>% strsplit(", ")
+      tibble(
+        time = time,
+        frameIdx = as.integer(time * 25),  # Convert time to frame index (25 FPS)
+        wall_clock = wall_clock,
+        live = live,
+        possession = possession,
+        player_id = "ball",
+        num = "ball",
+        x = as.numeric(loc[[1]][1]),
+        y = as.numeric(loc[[1]][2]),
+        z = as.numeric(loc[[1]][3]),
+        spd = as.numeric(xml_attr(ball, "spd")),
+        dist = as.numeric(xml_attr(ball, "dist")),
+        opta_id = NA,
+        role = "ball"
+      )
+    } else {
+      tibble()  # Empty tibble if no ball data
+    }
+    
+    bind_rows(players, ball_row)
+  })
+
+# Print column names for verification
+print(colnames(parsed_data))
+
+# Load and clean events data
+json_data <- stream_in(file("full-markings-3.jsonl"), flatten = TRUE)
+
+# Extract and clean player names from events data
+json_data_k <- json_data %>%
+  select(optaEvent.opPlayerId, optaEvent.playerName) %>%
+  na.omit() %>%
+  rename(opta_id = optaEvent.opPlayerId, name = optaEvent.playerName) %>%
+  mutate(opta_id = as.character(opta_id))
+
+# Join player names with parsed locational data
+parsed_data <- left_join(parsed_data, json_data_k, by = "opta_id")
+
+# Ensure names for ball rows remain NA
+parsed_data <- parsed_data %>%
+  mutate(name = ifelse(role == "ball", "ball", name))
+
+```
+
+```{r}
+xml_data <- read_xml("tracking-produced.xml")
+
+# Find all frame elements
+frames <- xml_find_all(xml_data, "//frame")
+
+# Limit to the first 1000 frames
+frames <- frames[1:1000]
+
+# Function to extract data from frames
+extract_frame_data <- function(frame) {
+  frame_time <- xml_attr(frame, "time")
+  players <- xml_find_all(frame, ".//player")
+  ball <- xml_find_all(frame, ".//ball")
+
+  # Extract player data
+  player_data <- map_df(players, function(player) {
+    tibble(
+      frame_time = as.numeric(frame_time),
+      player_id = xml_attr(player, "id"),
+      loc = xml_attr(player, "loc"),
+      spd = as.numeric(xml_attr(player, "spd")),
+      dist = as.numeric(xml_attr(player, "dist"))
+    )
+  })
+
+  # Extract ball data
+  ball_data <- map_df(ball, function(ball) {
+    tibble(
+      frame_time = as.numeric(frame_time),
+      player_id = "ball",
+      loc = xml_attr(ball, "loc"),
+      spd = as.numeric(xml_attr(ball, "spd")),
+      dist = as.numeric(xml_attr(ball, "dist"))
+    )
+  })
+
+  bind_rows(player_data, ball_data)
+}
+
+# Extract data from the first 1000 frames
+frame_data <- map_df(frames, extract_frame_data)
+
+# Preview the data
+print(head(frame_data))
+
+```
+
+
+```{r}
+# Filter the data for the first frame
+first_frame_data <- frame_data %>%
+  filter(frame_time == min(frame_time))  # Select rows for the first frame
+
+# Preview the first frame data (23 rows)
+kable(
+  first_frame_data,
+  caption = "Player and Ball Data for the First Frame"
+)
+```
+
+```{r}
+# Extract and split loc column into x, y, z coordinates
+first_frame_data <- first_frame_data %>%
+  separate(loc, into = c("x", "y", "z"), sep = ", ", convert = TRUE)
+
+# Plot players and ball on a 2D pitch
+ggplot(first_frame_data, aes(x = as.numeric(x), y = as.numeric(y), color = player_id)) +
+  geom_point(size = 4) +
+  labs(
+    title = "Player and Ball Positions for the First Frame",
+    x = "X Coordinate",
+    y = "Y Coordinate",
+    color = "Player/Ball ID"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+
+```{r}
+print_structure <- function(node, indent = "") {
+  cat(indent, "-", xml_name(node), "\n")
+  children <- xml_children(node)
+  if (length(children) > 0) {
+    for (child in children) {
+      print_structure(child, indent = paste0(indent, "  "))
+    }
+  }
+}
+
+# Print the structure of the XML
+print_structure(xml_data)
+```
+
+```{r}
+#json_data <- stream_in(file("C:/Users/kenny/OneDrive/Cognitive_Science_22/5.sem/Viborg_BSc_project/Materials/full-markings-3.jsonl"))
+#print(colnames(json_data))
+json_data <- stream_in(file("C:/Users/viggo/Documents/Cognitive Science/5th semester/Bachelor/git_workspace/vff_loc_data/full-markings-3.jsonl"), flatten = TRUE)
+
+json_data$optaEvent.playerName <- as.character(json_data$optaEvent.playerName)
+json_data$optaEvent.opPlayerId <- as.character(json_data$optaEvent.opPlayerId)
+
+# Ensure numeric types for coordinates and relevant fields
+json_data$optaEvent.x <- as.numeric(json_data$optaEvent.x)
+json_data$optaEvent.y <- as.numeric(json_data$optaEvent.y)
+json_data$optaEvent.typeId <- as.integer(json_data$optaEvent.typeId)
+
+# Check cleaned structure
+print(colnames(json_data))
+print(head(json_data))
+
+#write_csv(json_data, "C:/Users/viggo/Documents/Cognitive Science/5th semester/Bachelor/git_workspace/bachelor_vff/events_data_2.csv")
+```
+
+
+```{r}
+json_data <- stream_in(file("C:/Users/viggo/Documents/Cognitive Science/5th semester/Bachelor/git_workspace/vff_loc_data/full-markings-3.jsonl"), flatten = TRUE)
+print(colnames(json_data))
+print(json_data[166])
+#Playername OpplayerID 10 23
+json_data_k <- json_data %>% select(optaEvent.opPlayerId, optaEvent.playerName) 
+json_data_k <- na.omit(json_data_k) %>% rename(opta_id = optaEvent.opPlayerId) %>% rename(name=optaEvent.playerName)
+json_data_k$opta_id <- as.character(json_data_k$opta_id)
+ident <- left_join(json_data_k, parsed_data_1, by = "opta_id")
+ident <- distinct(ident, opta_id, .keep_all=T) %>% na.omit(ident)
+```
+
+```{r}
+df_1 <- inner_join(ident, parsed_data_1, by = "player_id")
+df_1 <- distinct(ident, name, .keep_all = T)
+df_2 <- inner_join(ident, parsed_data_2, by = "player_id")
+df_2 <- distinct(ident, name, .keep_all = T)
+```
+
+
+```{r}
+green_theme <- function() {
+  theme(
+    # add border 1)
+    panel.border = element_rect(colour = "green", fill = NA, linetype = 2),
+    # color background 2)
+    panel.background = element_rect(fill = "lightgreen"),
+    # modify grid 3)
+    panel.grid.major.x = element_line(colour = "darkgreen", linetype = 3, size = 0.5),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y =  element_line(colour = "darkgreen", linetype = 3, size = 0.5),
+    panel.grid.minor.y = element_blank(),
+    # modify text, axis and colour 4) and 5)
+    axis.text = element_text(colour = "darkgreen", face = "italic", family = "Times New Roman"),
+    axis.title = element_text(colour = "darkgreen", family = "Times New Roman"),
+    axis.ticks = element_line(colour = "darkgreen"),
+    # legend at the bottom 6)
+    legend.position = "bottom"
+  )
+}
+```
+
+
+```{r}
+frame_1 <- ggplot(df_1, aes(x, y, col = type)) +
+  geom_jitter() +
+  green_theme()
+
+frame_2 <- ggplot(df_2, aes(x, y, col = type)) +
+  geom_jitter() +
+  green_theme()
+
+frame_1 + geom_label_repel(aes(label = name),
+                  box.padding   = 0.35, 
+                  point.padding = 0.5,
+                  segment.color = 'grey50')
+
+frame_2 + geom_label_repel(aes(label = opta_id),
+                  box.padding   = 0.35, 
+                  point.padding = 0.5,
+                  segment.color = 'grey50')
+```
+
